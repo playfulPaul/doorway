@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Doorway</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #141420;
+      color: #e8e6dc;
+    }
+
+    body {
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 16px;
+      font-weight: 500;
+      margin: 0 0 4px 0;
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      opacity: 0.5;
+      margin-bottom: 24px;
+    }
+
+    .status {
+      font-size: 15px;
+      line-height: 1.5;
+      padding: 16px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      margin-bottom: 24px;
+    }
+
+    .status.ok {
+      border-color: rgba(120, 220, 180, 0.3);
+      background: rgba(120, 220, 180, 0.06);
+    }
+
+    .status.warn {
+      border-color: rgba(220, 180, 120, 0.3);
+      background: rgba(220, 180, 120, 0.06);
+    }
+
+    .diagnostics {
+      font-size: 12px;
+      opacity: 0.6;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 16px;
+    }
+
+    .diagnostics .row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+    }
+
+    .diagnostics .label {
+      opacity: 0.7;
+    }
+
+    .diagnostics code {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 6px;
+      border-radius: 3px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <h1>Doorway</h1>
+  <div class="subtitle">Day 0 — platform handshake</div>
+
+  <div class="status" id="status">Checking&hellip;</div>
+
+  <div class="diagnostics">
+    <div class="row">
+      <span class="label">Host detected</span>
+      <span id="in-chatgpt">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Display mode</span>
+      <span id="display-mode">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Viewport</span>
+      <span id="viewport">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Theme</span>
+      <span id="theme">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Locale</span>
+      <span id="locale">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Tool output</span>
+      <code id="tool-output">&mdash;</code>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // Gate everything that touches window.openai behind this check — lets
+      // the same HTML be opened as a plain file:// URL for iteration.
+      const inChatGPT = typeof window !== 'undefined' && !!window.openai;
+
+      const $ = (id) => document.getElementById(id);
+
+      $('in-chatgpt').textContent = inChatGPT ? 'yes' : 'no (not in ChatGPT)';
+
+      function render() {
+        if (!inChatGPT) {
+          $('status').className = 'status warn';
+          $('status').textContent =
+            'Widget loaded outside ChatGPT. Open as a dev-mode connector to test the handshake.';
+          return;
+        }
+
+        const api = window.openai;
+        $('display-mode').textContent = api.displayMode || 'inline';
+        $('viewport').textContent =
+          (api.maxWidth || '?') + ' \u00d7 ' + (api.maxHeight || '?');
+        $('theme').textContent = api.theme || 'unknown';
+        $('locale').textContent = api.locale || 'unknown';
+
+        const out = api.toolOutput;
+        $('tool-output').textContent = out ? JSON.stringify(out) : 'empty';
+
+        if (out && out.status === 'ok') {
+          $('status').className = 'status ok';
+          $('status').textContent = out.message ||
+            'Handshake successful.';
+        } else {
+          $('status').className = 'status warn';
+          $('status').textContent =
+            'Widget loaded, but no tool output received yet. Did ChatGPT call open_world?';
+        }
+      }
+
+      render();
+
+      // ChatGPT fires this on viewport changes, theme switches, mode changes.
+      // Listen from day one — on some devices a mode change remounts the
+      // whole iframe, so treat every set_globals as a fresh render trigger.
+      window.addEventListener('openai:set_globals', render);
+    })();
+  </script>
+</body>
+</html>
