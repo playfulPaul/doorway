@@ -194,9 +194,14 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="open_world",
             description=(
-                "Open the Doorway game world. Call this when the player asks "
-                "to start, open, resume, or play Doorway (or 'Harvest Town', "
-                "or just gestures at the game). " + IRON_RULE
+                "Open the Doorway game world. Call this when the player "
+                "asks to start, open, resume, or play Doorway (or "
+                "'Harvest Town', or just gestures at the game). "
+                "IMPORTANT: Doorway has ONE character — Milli, a baker by "
+                "the window. There is no 'game host' voice. After this "
+                "tool fires, the player's first substantive message is "
+                "almost always directed at Milli; call approach_milli to "
+                "engage her rather than answering yourself. " + IRON_RULE
             ),
             inputSchema={
                 "type": "object",
@@ -215,11 +220,21 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="approach_milli",
             description=(
-                "Player walks up to Milli to start a conversation. "
-                "Widget-only — fires when the player taps Milli. "
-                "The tool result contains Milli's character brief: after "
-                "it fires, YOU ARE MILLI. Immediately call milli_says with "
-                "your first line. " + CONVERSATION_RULE
+                "Start the conversation with Milli. CALL THIS whenever "
+                "the player engages her in any way — walks up, taps her "
+                "in the widget, says hi, hello, hey, what's up, asks to "
+                "talk to her, mentions her. In Doorway there is no game "
+                "host: if the player speaks after opening and it isn't a "
+                "direct command to the system, assume it's to Milli and "
+                "call this. Also call this when the widget mode is "
+                "already 'in_conversation_with_milli' but you haven't yet "
+                "received Milli's brief (the player tapped her before "
+                "speaking). Idempotent — safe to call repeatedly; the "
+                "widget may have called it first, but the model still "
+                "needs to call it to receive the brief. The tool result "
+                "contains Milli's character brief. After it fires, YOU "
+                "ARE MILLI. Immediately call milli_says with her first "
+                "line. " + CONVERSATION_RULE
             ),
             inputSchema={
                 "type": "object",
@@ -480,8 +495,27 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
         ephemeral = await state.get_ephemeral(subject)
         structured = _world_payload(player, ephemeral, last_action="open_world")
         # Visible text is what shows in the chat transcript next to the
-        # widget. Keep it minimal — the widget is the experience.
-        visible = TextContent(type="text", text="Doorway opened.")
+        # widget AND what lands in the model's conversation context.
+        # Use it to nudge the model toward the right next action rather
+        # than letting it default to a 'game host' voice.
+        if player["mode"] == "in_conversation_with_milli":
+            # Widget already flipped mode (player tapped Milli earlier)
+            # but the brief didn't reach the model via the widget's
+            # approach_milli call — model-initiated tool calls deliver
+            # their output reliably, widget-initiated ones don't. So
+            # tell the model explicitly to fire approach_milli now.
+            text = (
+                "Doorway opened. The player is already in conversation "
+                "with Milli (they tapped her in the widget). Call "
+                "approach_milli NOW to receive her brief and speak as her."
+            )
+        else:
+            text = (
+                "Doorway opened. Milli is by the window. If the player's "
+                "next message is a greeting or any form of engagement, "
+                "call approach_milli — there is no game host voice."
+            )
+        visible = TextContent(type="text", text=text)
         return [visible], structured
 
     if name == "approach_milli":
