@@ -30,6 +30,23 @@ from typing import Any, Optional
 
 _memory_store: dict[str, dict[str, Any]] = {}
 
+# Ephemeral per-subject state — lives only in process memory, never in
+# Postgres. Day 2a uses this for the things that are conversation-scoped or
+# don't yet need to survive server restarts: current inventory, Milli's last
+# spoken line/mood. When Day 2b wires up persistent inventory, this will
+# migrate into the DB and we'll add a schema.
+_ephemeral_store: dict[str, dict[str, Any]] = {}
+
+
+def _ephemeral(sid: str) -> dict[str, Any]:
+    if sid not in _ephemeral_store:
+        _ephemeral_store[sid] = {
+            "inventory": ["wildflower"],
+            "milli_line": None,
+            "milli_mood": None,
+        }
+    return _ephemeral_store[sid]
+
 # ---------------------------------------------------------------------------
 # Postgres pool (lazy)
 # ---------------------------------------------------------------------------
@@ -136,6 +153,34 @@ async def get_or_create_player(subject_id: Optional[str]) -> dict:
             "mode": row["mode"],
             "position": _coerce_jsonb(row["position"]),
         }
+
+
+async def get_ephemeral(subject_id: Optional[str]) -> dict:
+    """Return the ephemeral (non-persistent) state for a subject: inventory,
+    Milli's latest line/mood. Lives only in process memory."""
+    sid = resolve_subject(subject_id)
+    return _deep_copy(_ephemeral(sid))
+
+
+async def set_milli_line(
+    subject_id: Optional[str], line: str, mood: str
+) -> dict:
+    """Record Milli's latest spoken line. Returns the updated ephemeral state."""
+    sid = resolve_subject(subject_id)
+    eph = _ephemeral(sid)
+    eph["milli_line"] = line
+    eph["milli_mood"] = mood
+    return _deep_copy(eph)
+
+
+async def clear_milli_line(subject_id: Optional[str]) -> dict:
+    """Wipe Milli's current line — called on leave_milli so the next
+    conversation opens clean."""
+    sid = resolve_subject(subject_id)
+    eph = _ephemeral(sid)
+    eph["milli_line"] = None
+    eph["milli_mood"] = None
+    return _deep_copy(eph)
 
 
 async def update_player(

@@ -1,23 +1,34 @@
 """
-Doorway MCP Server — POC (Day 1: world + mode flip, no chat yet).
+Doorway MCP Server — POC (Day 2a: real conversation voice, no items yet).
 
-Day 1 introduces three tools and one widget:
+Day 2a extends Day 1 with actual conversation. The architectural call here:
+Milli's lines live *inside the widget*, not in the chat. The chat is where
+the player types TO her; the widget is where she IS. This is the whole
+"doorway" question — does she feel like she lives somewhere?
+
+Tools:
 
   - open_world (model-callable): launches/resumes the experience. Reads
-    the player's stored mode + position, returns full world state for the
-    widget to render. If the player was last seen mid-conversation with
-    Milli, they resume in conversation mode — that's the persistence test.
+    stored mode + position + ephemeral conversation state, returns the
+    full payload for the widget. Persistence test carried over from Day 1.
 
-  - approach_milli (widget-only): the widget calls this when the player
-    taps Milli. Flips mode to in_conversation_with_milli, snaps the player
-    to the spot beside her.
+  - approach_milli (widget-only): fires when the player taps Milli. Flips
+    mode to in_conversation_with_milli AND returns Milli's host-instruction
+    brief as visible text — so the model immediately starts acting as her.
+    Clears any leftover milli_line so the next conversation opens clean.
 
-  - leave_milli (widget-only): called from the conversation placeholder's
-    Leave button. Flips mode back to world.
+  - milli_says (model-callable AND widget-accessible): how Milli speaks.
+    Every line she says goes through this. Takes (line, mood); stores the
+    line; widget renders it inside the conversation panel. Iron rule in
+    her brief: she must NEVER write text in chat — only tool calls. If
+    playtest shows drift, tighten the brief and the tool description.
 
-State of record lives in Postgres (or in-memory for local dev). The widget
-is a dumb renderer — it never holds load-bearing state. See state.py and
-CHATGPT_APP_HANDOVER.md (the hybrid pattern section).
+  - leave_milli (widget-only): step-away button. Flips mode back to world,
+    wipes milli_line so next visit starts fresh.
+
+State of record for persistent fields (mode + position) lives in Postgres.
+Ephemeral fields (inventory, milli_line, milli_mood) live in process memory
+for now — Day 2b will migrate inventory into the DB when give_item lands.
 
 Critical platform details (do not relax without re-reading the handover):
   - Tool/resource _meta uses kwarg `_meta=` (with underscore) so pydantic
@@ -25,11 +36,11 @@ Critical platform details (do not relax without re-reading the handover):
   - Resource MIME type is "text/html+skybridge".
   - ui.resourceUri + openai/outputTemplate point to the same widget URI.
   - CSP set both as ui.csp.* (MCP standard) and openai/widgetCSP.* (OpenAI).
-  - approach_milli / leave_milli are widget-only via ui.visibility = ["app"]
-    AND openai/widgetAccessible = True, so the widget can fire them and
-    the model can't.
-  - Widget URI is bumped from v1 → v2 because the HTML changed materially;
-    cache-bust discipline requires bumping AND renaming the file.
+  - approach_milli / leave_milli are widget-only via ui.visibility = ["app"].
+  - milli_says is NOT restricted to widget — the model MUST be able to call
+    it. openai/widgetAccessible is also True so widget-initiated speech
+    (e.g. quick replies) could work later without a server change.
+  - Widget URI bumped on every HTML change for cache-bust discipline.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from . import milli as milli_module
 from . import state
 
 # ---------------------------------------------------------------------------
@@ -68,8 +80,12 @@ from . import state
 #        synchronously inside a one-shot pointerdown handler. First tap
 #        on the widget = pin gesture. Argument shape is { mode: "pip" }
 #        not "pip". See "user-gesture rule" in CHATGPT_APP_HANDOVER.md.
-WIDGET_URI = "ui://widget/doorway-v5.html"
-WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v5.html"
+#   v6 = Day 2a — real conversation panel. Milli's latest line renders
+#        inside the widget (structuredContent.milli_line), not in chat.
+#        Inventory badge shows the wildflower. Player types in the
+#        ChatGPT chat; widget owns Milli's side.
+WIDGET_URI = "ui://widget/doorway-v6.html"
+WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v6.html"
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -84,6 +100,15 @@ IRON_RULE = (
     "THE WIDGET IS THE GAME. DO NOT NARRATE THE WIDGET CONTENTS, DO NOT "
     "DESCRIBE WHAT THE PLAYER SEES, DO NOT OFFER STRATEGY. The widget is "
     "self-contained; the player interacts with it directly."
+)
+
+# Rule specific to conversation mode. The model MUST speak only through
+# milli_says — never in plain chat text. This is what makes Milli feel like
+# she lives in the widget rather than being a chatbot.
+CONVERSATION_RULE = (
+    "WHEN MILLI SPEAKS, CALL THE milli_says TOOL. DO NOT WRITE TEXT IN CHAT. "
+    "Every line she says MUST go through milli_says(line, mood). Plain text "
+    "responses break the illusion that she lives in the kitchen."
 )
 
 
@@ -108,19 +133,24 @@ def _current_subject() -> Optional[str]:
     return None
 
 
-def _world_payload(player: dict, last_action: str) -> dict:
+def _world_payload(player: dict, ephemeral: dict, last_action: str) -> dict:
     """Shape the structuredContent the widget renders from.
 
     Keep this stable across tools — the widget reads from a single shape
-    no matter which tool produced the latest result.
+    no matter which tool produced the latest result. Day 2a adds three
+    fields: inventory (for the flower badge), milli_line (her latest
+    spoken line), milli_mood (tone hint for styling).
     """
     return {
         "mode": player["mode"],
         "player_position": player["position"],
         "milli_position": state.MILLI_POSITION,
         "room": state.ROOM,
+        "inventory": ephemeral.get("inventory", []),
+        "milli_line": ephemeral.get("milli_line"),
+        "milli_mood": ephemeral.get("milli_mood"),
         "last_action": last_action,
-        "phase": "day_1",
+        "phase": "day_2a",
     }
 
 
@@ -156,7 +186,10 @@ async def list_tools() -> list[Tool]:
             name="approach_milli",
             description=(
                 "Player walks up to Milli to start a conversation. "
-                "Widget-only — fires when the player taps Milli."
+                "Widget-only — fires when the player taps Milli. "
+                "The tool result contains Milli's character brief: after "
+                "it fires, YOU ARE MILLI. Immediately call milli_says with "
+                "your first line. " + CONVERSATION_RULE
             ),
             inputSchema={
                 "type": "object",
@@ -174,10 +207,56 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="milli_says",
+            description=(
+                "Milli speaks. This is HOW she speaks — every line she says "
+                "MUST go through this tool. Never write Milli's dialogue as "
+                "plain text in chat. `line` is what she says, first-person, "
+                "in her voice. `mood` is one of: warm, dry, curious, "
+                "guarded, amused, quiet. " + CONVERSATION_RULE
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "line": {
+                        "type": "string",
+                        "description": (
+                            "The exact line Milli says, first-person, in her "
+                            "voice. Usually one sentence; two if the pause "
+                            "matters. No stage directions."
+                        ),
+                    },
+                    "mood": {
+                        "type": "string",
+                        "enum": [
+                            "warm",
+                            "dry",
+                            "curious",
+                            "guarded",
+                            "amused",
+                            "quiet",
+                        ],
+                        "description": "Tonal hint for how the line lands.",
+                    },
+                },
+                "required": ["line", "mood"],
+                "additionalProperties": False,
+            },
+            _meta={
+                "ui.resourceUri": WIDGET_URI,
+                "openai/outputTemplate": WIDGET_URI,
+                "openai/toolInvocation/invoking": "",
+                "openai/toolInvocation/invoked": "",
+                # Widget may also call this later (quick replies, auto-lines).
+                "openai/widgetAccessible": True,
+                # Visible to the model — this is its primary way to speak.
+            },
+        ),
+        Tool(
             name="leave_milli",
             description=(
                 "Player steps away from Milli, returning to the room. "
-                "Widget-only — fires when the player presses Leave in the "
+                "Widget-only — fires when the player presses Step away in the "
                 "conversation view."
             ),
             inputSchema={
@@ -207,19 +286,41 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
 
     if name == "open_world":
         player = await state.get_or_create_player(subject)
-        structured = _world_payload(player, last_action="open_world")
+        ephemeral = await state.get_ephemeral(subject)
+        structured = _world_payload(player, ephemeral, last_action="open_world")
         # Visible text is what shows in the chat transcript next to the
         # widget. Keep it minimal — the widget is the experience.
         visible = TextContent(type="text", text="Doorway opened.")
         return [visible], structured
 
     if name == "approach_milli":
+        # Fresh conversation — wipe any residual line from a previous visit.
+        await state.clear_milli_line(subject)
         player = await state.update_player(
             subject,
             mode="in_conversation_with_milli",
             position=state.PLAYER_AT_MILLI,
         )
-        structured = _world_payload(player, last_action="approach_milli")
+        ephemeral = await state.get_ephemeral(subject)
+        structured = _world_payload(player, ephemeral, last_action="approach_milli")
+        # Hand the brief to the model as host instructions. After this
+        # returns, the model should immediately call milli_says with its
+        # first line. The visible text is the brief — the model reads this
+        # and behaves as Milli for the rest of the conversation.
+        brief = milli_module.compose_milli_brief()
+        visible = TextContent(type="text", text=brief)
+        return [visible], structured
+
+    if name == "milli_says":
+        line = (arguments or {}).get("line", "")
+        mood = (arguments or {}).get("mood", "warm")
+        if not line:
+            raise ValueError("milli_says requires a non-empty 'line'.")
+        ephemeral = await state.set_milli_line(subject, line=line, mood=mood)
+        player = await state.get_or_create_player(subject)
+        structured = _world_payload(player, ephemeral, last_action="milli_says")
+        # Empty visible text — the line is rendered in the widget, not
+        # repeated in the chat transcript. That keeps Milli "in the room."
         visible = TextContent(type="text", text="")
         return [visible], structured
 
@@ -227,12 +328,14 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
         # Step the player back to a spot just past Milli's left, so the
         # transition out feels physical rather than a teleport.
         step_back = {"x": 60, "y": 50}
+        await state.clear_milli_line(subject)
         player = await state.update_player(
             subject,
             mode="world",
             position=step_back,
         )
-        structured = _world_payload(player, last_action="leave_milli")
+        ephemeral = await state.get_ephemeral(subject)
+        structured = _world_payload(player, ephemeral, last_action="leave_milli")
         visible = TextContent(type="text", text="")
         return [visible], structured
 
@@ -248,8 +351,8 @@ async def list_resources() -> list[Resource]:
     return [
         Resource(
             uri=AnyUrl(WIDGET_URI),
-            name="Doorway Widget v5",
-            description="Doorway POC widget — Day 1 (world + conversation placeholder).",
+            name="Doorway Widget v6",
+            description="Doorway POC widget — Day 2a (world + real conversation panel).",
             mimeType="text/html+skybridge",
             _meta={
                 # Day 1 widget is self-contained; no CDN fetches.
