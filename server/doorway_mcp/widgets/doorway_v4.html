@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Doorway</title>
+<style>
+  /* ---- Reset / base ---- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    color: #e5dfd2;
+    background: transparent;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* ---- App shell ---- */
+  /* The widget is designed to live pinned in PIP mode (per Day 1 design
+     call). That means it needs to look okay at ~320px tall — no internal
+     scrollbars, no cramped sprites. Inline mode gets a taller default
+     so it's not a postage stamp in the chat transcript. */
+  #app {
+    width: 100%;
+    height: 100%;
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+    background: #1a1612;
+    border-radius: 10px;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 220ms ease-out;
+  }
+  #app.ready { opacity: 1; }
+  body:not(.pinned) #app { min-height: 440px; }
+
+  /* ---- World mode ---- */
+  #world {
+    position: relative;       /* positioning context for absolutely-placed sprites/furniture */
+    flex: 1;
+    /* Warm interior wood-floor feel via gradient — placeholder, not real art */
+    background:
+      radial-gradient(ellipse at 50% 30%, #2d231c 0%, #1a1310 60%, #120c08 100%),
+      #1a1310;
+    cursor: pointer;
+    user-select: none;
+    overflow: hidden;
+  }
+
+  /* The room is laid out in abstract 0–100 percentage coords from the
+     server. Everything inside #world uses % positioning so the layout
+     scales to whatever iframe size ChatGPT gives us. */
+  .obj {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  /* Furniture */
+  .furn {
+    transform: translate(0, 0); /* corner-anchored */
+    border-radius: 3px;
+  }
+  .furn.window {
+    background: linear-gradient(160deg, #5a7a8a 0%, #3a5666 100%);
+    box-shadow:
+      inset 0 0 0 2px #1a1310,
+      0 0 24px rgba(120, 160, 180, 0.18);
+    border: 1px solid #1a1310;
+  }
+  .furn.window::before, .furn.window::after {
+    content: ""; position: absolute; background: #1a1310;
+  }
+  .furn.window::before { left: 50%; top: 0; bottom: 0; width: 2px; transform: translateX(-50%); }
+  .furn.window::after  { top: 50%; left: 0; right: 0; height: 2px; transform: translateY(-50%); }
+
+  .furn.counter {
+    background: linear-gradient(180deg, #6b4a2e 0%, #4a3220 100%);
+    box-shadow: 0 2px 0 rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06);
+    border-radius: 2px;
+  }
+  .furn.table {
+    background: linear-gradient(180deg, #5a3d24 0%, #3d2818 100%);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05);
+    border-radius: 4px;
+  }
+  .furn.door {
+    background: linear-gradient(90deg, #2a1c12 0%, #3a2818 50%, #2a1c12 100%);
+    border: 1px solid #1a1310;
+    border-radius: 1px;
+    box-shadow: inset 0 0 6px rgba(0,0,0,0.6);
+  }
+
+  /* Characters */
+  .char {
+    width: 26px;
+    height: 44px;
+    transition: left 480ms cubic-bezier(0.33, 0, 0.4, 1),
+                top 480ms cubic-bezier(0.33, 0, 0.4, 1);
+    will-change: left, top;
+  }
+  .char .body {
+    position: absolute;
+    left: 50%; top: 38%;
+    width: 22px; height: 28px;
+    transform: translateX(-50%);
+    border-radius: 6px 6px 4px 4px;
+  }
+  .char .head {
+    position: absolute;
+    left: 50%; top: 0;
+    width: 14px; height: 14px;
+    transform: translateX(-50%);
+    border-radius: 50%;
+  }
+  .char .shadow {
+    position: absolute;
+    left: 50%; bottom: -3px;
+    width: 22px; height: 5px;
+    transform: translateX(-50%);
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 70%);
+    border-radius: 50%;
+  }
+
+  /* Player — cooler blue tones */
+  #player .body { background: linear-gradient(180deg, #4a78a8 0%, #2f5378 100%); }
+  #player .head { background: #d8b89a; box-shadow: inset 0 -2px 0 rgba(0,0,0,0.15); }
+
+  /* Milli — warmer terracotta + muted sage. She faces the window slightly. */
+  #milli .body { background: linear-gradient(180deg, #8a5a4a 0%, #5e3a2c 100%); }
+  #milli .head { background: #e8c8a8; box-shadow: inset 0 -2px 0 rgba(0,0,0,0.15); }
+  #milli { transform: translate(-50%, -50%) rotate(-6deg); }
+  #milli.tappable { cursor: pointer; pointer-events: auto; }
+  #milli.tappable:hover { filter: brightness(1.15); }
+
+  /* Subtle interaction hint — tiny floating dot above Milli */
+  #milli::before {
+    content: "·";
+    position: absolute;
+    left: 50%; top: -18px;
+    transform: translateX(-50%);
+    font-size: 28px; line-height: 1;
+    color: rgba(232, 200, 168, 0.55);
+    animation: hintBob 2.4s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes hintBob {
+    0%, 100% { transform: translateX(-50%) translateY(0); opacity: 0.4; }
+    50%      { transform: translateX(-50%) translateY(-4px); opacity: 0.85; }
+  }
+
+  /* HUD strip — tiny, just enough to know what's going on */
+  #hud {
+    height: 28px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: rgba(229, 223, 210, 0.55);
+    background: #120c08;
+    border-top: 1px solid rgba(255,255,255,0.04);
+    letter-spacing: 0.04em;
+  }
+  #hud .left { font-weight: 500; }
+  #hud .right { font-style: italic; opacity: 0.7; }
+
+  /* ---- Conversation mode ---- */
+  #conversation {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(20, 14, 10, 0.96) 0%, rgba(20, 14, 10, 0.99) 100%);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+    text-align: center;
+    animation: fadeIn 320ms ease-out;
+  }
+  #conversation.show { display: flex; }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: scale(0.985); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+
+  #conversation .title {
+    font-size: 20px;
+    font-weight: 500;
+    color: #e8c8a8;
+    margin: 0 0 6px 0;
+    letter-spacing: 0.02em;
+  }
+  #conversation .subtitle {
+    font-size: 13px;
+    color: rgba(229, 223, 210, 0.55);
+    margin: 0 0 28px 0;
+    max-width: 340px;
+    line-height: 1.5;
+  }
+  #conversation .placeholder {
+    font-size: 12px;
+    color: rgba(229, 223, 210, 0.35);
+    font-style: italic;
+    margin-bottom: 32px;
+  }
+
+  .leave-btn {
+    background: transparent;
+    border: 1px solid rgba(232, 200, 168, 0.4);
+    color: #e8c8a8;
+    padding: 10px 22px;
+    font-size: 13px;
+    font-family: inherit;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease;
+    letter-spacing: 0.04em;
+  }
+  .leave-btn:hover {
+    background: rgba(232, 200, 168, 0.08);
+    border-color: rgba(232, 200, 168, 0.7);
+  }
+  .leave-btn:disabled {
+    opacity: 0.4; cursor: wait;
+  }
+
+  /* ---- No-host fallback (when opened in a plain browser) ---- */
+  #no-host {
+    display: none;
+    padding: 24px;
+    color: #ddd;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  body.no-host #app { display: none; }
+  body.no-host #no-host { display: block; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="world">
+    <!-- Furniture and characters get rendered here from JS -->
+    <div id="furniture"></div>
+    <div id="player" class="char obj">
+      <div class="head"></div>
+      <div class="body"></div>
+      <div class="shadow"></div>
+    </div>
+    <div id="milli" class="char obj tappable" title="Milli">
+      <div class="head"></div>
+      <div class="body"></div>
+      <div class="shadow"></div>
+    </div>
+
+    <!-- Conversation overlay (hidden by default; shown when mode flips) -->
+    <div id="conversation">
+      <div class="title">You're talking to Milli</div>
+      <div class="subtitle">She's standing by the window, watching the light. She hasn't said anything yet.</div>
+      <div class="placeholder">[real conversation lands tomorrow — Day 2]</div>
+      <button class="leave-btn" id="leave-btn">Step away</button>
+    </div>
+  </div>
+
+  <div id="hud">
+    <div class="left" id="hud-mode">world</div>
+    <div class="right" id="hud-hint">tap to move · tap Milli to talk</div>
+  </div>
+</div>
+
+<div id="no-host">
+  <strong>Doorway widget — host bridge not detected.</strong>
+  <p>This widget is meant to load inside ChatGPT. If you're seeing this in a regular browser, that's expected — open it via the connector instead.</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- Detect host ---------------------------------------------------------
+  const inChatGPT = typeof window !== "undefined" && !!window.openai;
+  if (!inChatGPT) {
+    document.body.classList.add("no-host");
+    return;
+  }
+
+  // ---- DOM refs ------------------------------------------------------------
+  const app = document.getElementById("app");
+  const world = document.getElementById("world");
+  const furnitureLayer = document.getElementById("furniture");
+  const playerEl = document.getElementById("player");
+  const milliEl = document.getElementById("milli");
+  const conversationEl = document.getElementById("conversation");
+  const leaveBtn = document.getElementById("leave-btn");
+  const hudMode = document.getElementById("hud-mode");
+  const hudHint = document.getElementById("hud-hint");
+
+  // ---- State ---------------------------------------------------------------
+  // The widget treats toolOutput as the source of truth on every render.
+  // No load-bearing JS state — see CHATGPT_APP_HANDOVER.md hybrid pattern.
+  //
+  // EXCEPTION (learned the hard way, Day 1): widget-initiated tool calls
+  // (approach_milli, leave_milli) don't reliably trigger toolOutput updates
+  // in ChatGPT the way model-initiated calls do. So we keep a short-lived
+  // `override` payload that takes precedence over window.openai.toolOutput
+  // until the next host refresh. The server is still source of truth — we
+  // just stop pretending the widget can wait silently for the host to push.
+  let furnitureRendered = false;
+  let pendingToolCall = false;
+  let override = null;
+
+  // ---- Coordinate translation ---------------------------------------------
+  // Server gives 0–100 coords; we convert to % strings for CSS positioning.
+  // This means the room scales to whatever iframe size ChatGPT hands us.
+  function toPercent(coord) {
+    return Math.max(0, Math.min(100, coord)) + "%";
+  }
+
+  // The Apps SDK has shifted the shape of callTool's return value across
+  // versions. Be generous about what we accept.
+  function extractOutput(result) {
+    if (!result || typeof result !== "object") return null;
+    if (result.structuredContent) return result.structuredContent;
+    if (result.toolOutput) return result.toolOutput;
+    if (result.mode || result.player_position) return result; // already the payload
+    return null;
+  }
+
+  function currentOutput() {
+    if (override) return override;
+    return (window.openai && window.openai.toolOutput) || {};
+  }
+
+  // ---- Render furniture once ----------------------------------------------
+  function renderFurniture(room) {
+    if (furnitureRendered || !room || !room.furniture) return;
+    furnitureLayer.innerHTML = "";
+    for (const f of room.furniture) {
+      const el = document.createElement("div");
+      el.className = "obj furn " + (f.kind || "");
+      el.style.left = toPercent(f.x);
+      el.style.top = toPercent(f.y);
+      el.style.width = (f.w || 5) + "%";
+      el.style.height = (f.h || 5) + "%";
+      furnitureLayer.appendChild(el);
+    }
+    furnitureRendered = true;
+  }
+
+  // ---- Render characters --------------------------------------------------
+  function renderCharacters(toolOutput) {
+    if (toolOutput.player_position) {
+      playerEl.style.left = toPercent(toolOutput.player_position.x);
+      playerEl.style.top = toPercent(toolOutput.player_position.y);
+    }
+    if (toolOutput.milli_position) {
+      milliEl.style.left = toPercent(toolOutput.milli_position.x);
+      milliEl.style.top = toPercent(toolOutput.milli_position.y);
+    }
+  }
+
+  // ---- Render mode (world vs in_conversation_with_milli) ------------------
+  function renderMode(mode) {
+    hudMode.textContent = mode || "world";
+    if (mode === "in_conversation_with_milli") {
+      conversationEl.classList.add("show");
+      milliEl.classList.remove("tappable");
+      hudHint.textContent = "talking to Milli";
+    } else {
+      conversationEl.classList.remove("show");
+      milliEl.classList.add("tappable");
+      hudHint.textContent = "tap to move · tap Milli to talk";
+    }
+  }
+
+  // ---- Full render --------------------------------------------------------
+  function render() {
+    const out = currentOutput();
+    if (out.room) renderFurniture(out.room);
+    renderCharacters(out);
+    renderMode(out.mode);
+  }
+
+  // ---- Tool call helper ---------------------------------------------------
+  // Two-layer update: optimistic local flip (so the UI feels instant) plus
+  // whatever the server returns (the truth). If the host later pushes a
+  // toolOutput update we'll pick that up naturally — clearing `override`.
+  async function callTool(name, optimisticPatch) {
+    if (pendingToolCall) return;
+    pendingToolCall = true;
+
+    // Optimistic flip — the widget knows the expected transition.
+    if (optimisticPatch) {
+      override = Object.assign({}, currentOutput(), optimisticPatch);
+      render();
+    }
+
+    try {
+      const result = await window.openai.callTool(name, {});
+      const fresh = extractOutput(result);
+      if (fresh) {
+        override = fresh;
+        render();
+      }
+    } catch (err) {
+      console.error("[doorway] callTool failed", name, err);
+      // Revert optimism on failure so we don't show a lie.
+      override = null;
+      render();
+    } finally {
+      // Brief settle window so we don't double-fire on accidental taps.
+      setTimeout(() => { pendingToolCall = false; }, 300);
+    }
+  }
+
+  // ---- Tap-to-move (visual only — no server commit until engagement) ------
+  function handleWorldTap(e) {
+    // Ignore taps while in conversation mode
+    const mode = currentOutput().mode;
+    if (mode === "in_conversation_with_milli") return;
+
+    // Compute tap position as % of the world rect
+    const rect = world.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+    // Tap on Milli (or close enough): walk-then-approach.
+    // Hit area is generous — 18 units in 0–100 coords ≈ ~18% of the room —
+    // so players don't have to pixel-hunt the sprite.
+    const out = currentOutput();
+    const milliPos = out.milli_position;
+    const hitMilli = e.target === milliEl || milliEl.contains(e.target);
+    if (milliPos) {
+      const dx = x - milliPos.x;
+      const dy = y - milliPos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (hitMilli || distance < 18) {
+        // Animate player toward Milli, then fire approach_milli.
+        playerEl.style.left = toPercent(milliPos.x - 8);
+        playerEl.style.top = toPercent(milliPos.y + 4);
+        setTimeout(function () {
+          callTool("approach_milli", {
+            mode: "in_conversation_with_milli",
+            player_position: { x: milliPos.x - 8, y: milliPos.y + 4 },
+          });
+        }, 480);
+        return;
+      }
+    }
+
+    // Plain floor tap — animate locally only, no server call.
+    playerEl.style.left = toPercent(x);
+    playerEl.style.top = toPercent(y);
+  }
+
+  world.addEventListener("click", handleWorldTap);
+
+  leaveBtn.addEventListener("click", function () {
+    leaveBtn.disabled = true;
+    callTool("leave_milli", { mode: "world" })
+      .finally(function () { leaveBtn.disabled = false; });
+  });
+
+  // ---- Display mode pinning -----------------------------------------------
+  // Design decision (Day 1): the widget IS the game. One pinned window,
+  // chats flow underneath. Request PIP on load; reflect the granted mode
+  // on <body> so CSS can respond. ChatGPT may reject (especially on
+  // mobile) — if so we just stay inline, no harm done.
+  function reflectDisplayMode(mode) {
+    document.body.classList.toggle("pinned", mode === "pip");
+    document.body.classList.toggle("fullscreen", mode === "fullscreen");
+  }
+
+  async function requestPip() {
+    try {
+      // API surface varies by Apps SDK version — try the most common first.
+      const fn =
+        (typeof window.openai.requestDisplayMode === "function" && window.openai.requestDisplayMode) ||
+        (typeof window.openai.setDisplayMode === "function" && window.openai.setDisplayMode);
+      if (fn) {
+        const res = await fn.call(window.openai, "pip");
+        // Some SDK versions return the granted mode; some return void and
+        // let us observe via window.openai.displayMode.
+        const granted =
+          (res && typeof res === "object" && res.mode) ||
+          (typeof res === "string" && res) ||
+          window.openai.displayMode;
+        reflectDisplayMode(granted || "inline");
+      } else {
+        // Older/newer SDK: just mirror whatever the host reports.
+        reflectDisplayMode(window.openai.displayMode || "inline");
+      }
+    } catch (err) {
+      console.warn("[doorway] PIP request declined, staying inline", err);
+      reflectDisplayMode(window.openai.displayMode || "inline");
+    }
+  }
+
+  // ---- React to host updates ----------------------------------------------
+  // openai:set_globals fires on viewport changes, theme switches, mode
+  // transitions, AND display mode changes. When the host pushes a fresh
+  // toolOutput, trust it over our optimistic override.
+  window.addEventListener("openai:set_globals", function () {
+    override = null;
+    reflectDisplayMode(window.openai.displayMode || "inline");
+    render();
+  });
+
+  // MCP notifications — tool results from widget-initiated calls.
+  window.addEventListener("message", function (event) {
+    const data = event && event.data;
+    if (data && data.method === "ui/notifications/tool-result") {
+      override = null;
+      render();
+    }
+  });
+
+  // ---- Initial render -----------------------------------------------------
+  reflectDisplayMode(window.openai.displayMode || "inline");
+  render();
+  requestAnimationFrame(function () { app.classList.add("ready"); });
+  // Ask to pin AFTER the first render so the user sees the world briefly
+  // before the dock — less jarring than popping into PIP before any paint.
+  setTimeout(requestPip, 400);
+})();
+</script>
+
+</body>
+</html>

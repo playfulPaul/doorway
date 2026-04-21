@@ -61,8 +61,10 @@ from . import state
 #        re-rendering because ChatGPT doesn't reliably push toolOutput
 #        updates for widget-initiated calls the way it does for model
 #        calls. v3 uses callTool's return value + optimistic local flip.
-WIDGET_URI = "ui://widget/doorway-v3.html"
-WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v3.html"
+#   v4 = PIP pinning. Widget requests picture-in-picture on load so the
+#        game stays a single persistent window and chats flow underneath.
+WIDGET_URI = "ui://widget/doorway-v4.html"
+WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v4.html"
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -241,7 +243,7 @@ async def list_resources() -> list[Resource]:
     return [
         Resource(
             uri=AnyUrl(WIDGET_URI),
-            name="Doorway Widget v3",
+            name="Doorway Widget v4",
             description="Doorway POC widget — Day 1 (world + conversation placeholder).",
             mimeType="text/html+skybridge",
             _meta={
