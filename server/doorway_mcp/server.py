@@ -1,34 +1,55 @@
 """
-Doorway MCP Server — POC (Day 2a: real conversation voice, no items yet).
+Doorway MCP Server — POC (Day 2b: conversation with items + structured close).
 
-Day 2a extends Day 1 with actual conversation. The architectural call here:
-Milli's lines live *inside the widget*, not in the chat. The chat is where
-the player types TO her; the widget is where she IS. This is the whole
-"doorway" question — does she feel like she lives somewhere?
+Day 2b adds the mechanical shape around the emotional centre Day 2a proved
+out. The model can now give Milli something (the flower), receive something
+back (her recipe card), and close the conversation with a structured outcome
+that a future Day 3 will turn into memory. Nothing here changes Milli's voice;
+it just gives her hands.
 
 Tools:
 
   - open_world (model-callable): launches/resumes the experience. Reads
     stored mode + position + ephemeral conversation state, returns the
-    full payload for the widget. Persistence test carried over from Day 1.
+    full payload for the widget.
 
-  - approach_milli (widget-only): fires when the player taps Milli. Flips
-    mode to in_conversation_with_milli AND returns Milli's host-instruction
-    brief as visible text — so the model immediately starts acting as her.
-    Clears any leftover milli_line so the next conversation opens clean.
+  - approach_milli (model-visible, widget-fired): fires when the player
+    taps Milli. Flips mode to in_conversation_with_milli AND returns
+    Milli's host-instruction brief as visible text — so the model
+    immediately starts acting as her. Clears any leftover milli_line so
+    the next conversation opens clean. NOTE: was ui.visibility=["app"] in
+    Day 2a/b v1 but that hid the brief from the model's context — it'd
+    flip mode but never become Milli. Now visible to the model; the
+    widget still fires it on tap, the model could also fire it (harmless
+    — same state transition).
 
   - milli_says (model-callable AND widget-accessible): how Milli speaks.
     Every line she says goes through this. Takes (line, mood); stores the
     line; widget renders it inside the conversation panel. Iron rule in
-    her brief: she must NEVER write text in chat — only tool calls. If
-    playtest shows drift, tighten the brief and the tool description.
+    her brief: she must NEVER write text in chat — only tool calls.
 
-  - leave_milli (widget-only): step-away button. Flips mode back to world,
-    wipes milli_line so next visit starts fresh.
+  - give_item (model-callable): player → NPC. Removes item from the
+    player's inventory. The model fires this when Milli accepts a thing
+    from the player in-fiction — e.g. "give_item(wildflower, to=milli)"
+    after the player offers the flower and she takes it.
+
+  - receive_item (model-callable): NPC → player. Adds item to the player's
+    inventory. Fires when Milli gives the player something — e.g.
+    "receive_item(recipe_card, from=milli)".
+
+  - end_conversation (model-callable): Milli closes the conversation. Takes
+    a structured outcome object (mood_after, summary in her voice,
+    promises in/out, relationship_delta). Flips mode back to world,
+    wipes the current line, stashes the outcome for Day 3 memory.
+
+  - leave_milli (widget-only): step-away button. Player-initiated fallback
+    when the model doesn't gracefully close. Flips mode back to world,
+    wipes milli_line so next visit starts fresh. No structured outcome —
+    that's what distinguishes a clean close from a user bail.
 
 State of record for persistent fields (mode + position) lives in Postgres.
-Ephemeral fields (inventory, milli_line, milli_mood) live in process memory
-for now — Day 2b will migrate inventory into the DB when give_item lands.
+Ephemeral fields (inventory, milli_line, milli_mood, last_outcome) live in
+process memory — Day 3 migrates inventory + conversation history into the DB.
 
 Critical platform details (do not relax without re-reading the handover):
   - Tool/resource _meta uses kwarg `_meta=` (with underscore) so pydantic
@@ -36,7 +57,11 @@ Critical platform details (do not relax without re-reading the handover):
   - Resource MIME type is "text/html+skybridge".
   - ui.resourceUri + openai/outputTemplate point to the same widget URI.
   - CSP set both as ui.csp.* (MCP standard) and openai/widgetCSP.* (OpenAI).
-  - approach_milli / leave_milli are widget-only via ui.visibility = ["app"].
+  - leave_milli is widget-only via ui.visibility = ["app"]. approach_milli
+    was briefly hidden but is now model-visible — hiding it from the model
+    also hid its result (the Milli brief), which meant the widget would
+    flip mode but the model would never "become" Milli and would keep
+    answering in a generic host voice.
   - milli_says is NOT restricted to widget — the model MUST be able to call
     it. openai/widgetAccessible is also True so widget-initiated speech
     (e.g. quick replies) could work later without a server change.
@@ -84,8 +109,12 @@ from . import state
 #        inside the widget (structuredContent.milli_line), not in chat.
 #        Inventory badge shows the wildflower. Player types in the
 #        ChatGPT chat; widget owns Milli's side.
-WIDGET_URI = "ui://widget/doorway-v6.html"
-WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v6.html"
+#   v7 = Day 2b — item exchange + end_conversation outcome. Inventory now
+#        animates in/out as items move. A closing "outcome card" reveals
+#        briefly when end_conversation fires, before the widget returns
+#        to world mode. recipe_card joins the inventory vocabulary.
+WIDGET_URI = "ui://widget/doorway-v7.html"
+WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v7.html"
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -137,9 +166,9 @@ def _world_payload(player: dict, ephemeral: dict, last_action: str) -> dict:
     """Shape the structuredContent the widget renders from.
 
     Keep this stable across tools — the widget reads from a single shape
-    no matter which tool produced the latest result. Day 2a adds three
-    fields: inventory (for the flower badge), milli_line (her latest
-    spoken line), milli_mood (tone hint for styling).
+    no matter which tool produced the latest result. Day 2b adds
+    last_outcome so the widget can show a small closing card when a
+    conversation ends gracefully.
     """
     return {
         "mode": player["mode"],
@@ -149,8 +178,9 @@ def _world_payload(player: dict, ephemeral: dict, last_action: str) -> dict:
         "inventory": ephemeral.get("inventory", []),
         "milli_line": ephemeral.get("milli_line"),
         "milli_mood": ephemeral.get("milli_mood"),
+        "last_outcome": ephemeral.get("last_outcome"),
         "last_action": last_action,
-        "phase": "day_2a",
+        "phase": "day_2b",
     }
 
 
@@ -202,8 +232,10 @@ async def list_tools() -> list[Tool]:
                 "openai/toolInvocation/invoking": "",
                 "openai/toolInvocation/invoked": "",
                 "openai/widgetAccessible": True,
-                # Hide from the model — the widget drives this.
-                "ui.visibility": ["app"],
+                # VISIBLE to the model — was ["app"] in the first Day 2a/2b
+                # build but that hid the brief (returned as this tool's
+                # visible text) from the model, so it never "became" Milli.
+                # Widget still fires it on tap; model can too, no harm.
             },
         ),
         Tool(
@@ -250,6 +282,165 @@ async def list_tools() -> list[Tool]:
                 # Widget may also call this later (quick replies, auto-lines).
                 "openai/widgetAccessible": True,
                 # Visible to the model — this is its primary way to speak.
+            },
+        ),
+        Tool(
+            name="give_item",
+            description=(
+                "Player → NPC. Call this from Milli's perspective when she "
+                "accepts something the player has offered — e.g. the "
+                "wildflower. This removes the item from the player's "
+                "inventory (it has physically left their hand). Do NOT call "
+                "this preemptively: only after the player has actually "
+                "offered the thing in fiction and Milli has chosen to "
+                "accept. " + CONVERSATION_RULE
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": "string",
+                        "description": (
+                            "Stable id of the item. Day 2b supports "
+                            "'wildflower'."
+                        ),
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": (
+                            "Who is receiving the item. For Day 2b this is "
+                            "'milli'."
+                        ),
+                    },
+                },
+                "required": ["item_id", "to"],
+                "additionalProperties": False,
+            },
+            _meta={
+                "ui.resourceUri": WIDGET_URI,
+                "openai/outputTemplate": WIDGET_URI,
+                "openai/toolInvocation/invoking": "",
+                "openai/toolInvocation/invoked": "",
+                "openai/widgetAccessible": True,
+                # Visible to the model.
+            },
+        ),
+        Tool(
+            name="receive_item",
+            description=(
+                "NPC → player. Call this when Milli hands the player "
+                "something — e.g. the recipe card. This adds the item to "
+                "the player's inventory. The player now has it. Use this "
+                "when the gift is a genuine choice, not a transaction. "
+                + CONVERSATION_RULE
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": "string",
+                        "description": (
+                            "Stable id of the item. Day 2b supports "
+                            "'recipe_card'."
+                        ),
+                    },
+                    "from": {
+                        "type": "string",
+                        "description": (
+                            "Who is giving the item. For Day 2b this is "
+                            "'milli'."
+                        ),
+                    },
+                },
+                "required": ["item_id", "from"],
+                "additionalProperties": False,
+            },
+            _meta={
+                "ui.resourceUri": WIDGET_URI,
+                "openai/outputTemplate": WIDGET_URI,
+                "openai/toolInvocation/invoking": "",
+                "openai/toolInvocation/invoked": "",
+                "openai/widgetAccessible": True,
+            },
+        ),
+        Tool(
+            name="end_conversation",
+            description=(
+                "Milli closes the conversation — call this AFTER you've "
+                "said your final line via milli_says, when the moment has "
+                "reached a natural close. The outcome object is Milli's "
+                "honest read of what just happened; it gets stashed so she "
+                "remembers next time. Do NOT call this in your first few "
+                "exchanges. Do NOT call this before saying goodbye. "
+                + CONVERSATION_RULE
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "outcome": {
+                        "type": "object",
+                        "properties": {
+                            "mood_after": {
+                                "type": "string",
+                                "enum": ["opened", "small", "unchanged", "hurt"],
+                                "description": (
+                                    "How Milli feels now the conversation is "
+                                    "over. Honest, not generous."
+                                ),
+                            },
+                            "conversation_summary": {
+                                "type": "string",
+                                "description": (
+                                    "One or two sentences in Milli's own "
+                                    "first-person voice. Specific, not "
+                                    "generic. What she'll remember."
+                                ),
+                            },
+                            "promises_from_player": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Things the player promised Milli. "
+                                    "Empty array if nothing."
+                                ),
+                            },
+                            "promises_to_player": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Things Milli promised the player. "
+                                    "Empty array if nothing."
+                                ),
+                            },
+                            "relationship_delta": {
+                                "type": "integer",
+                                "enum": [-1, 0, 1],
+                                "description": (
+                                    "-1 pushed away, 0 held steady, "
+                                    "+1 warmer. Honest."
+                                ),
+                            },
+                        },
+                        "required": [
+                            "mood_after",
+                            "conversation_summary",
+                            "promises_from_player",
+                            "promises_to_player",
+                            "relationship_delta",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["outcome"],
+                "additionalProperties": False,
+            },
+            _meta={
+                "ui.resourceUri": WIDGET_URI,
+                "openai/outputTemplate": WIDGET_URI,
+                "openai/toolInvocation/invoking": "",
+                "openai/toolInvocation/invoked": "",
+                "openai/widgetAccessible": True,
+                # Visible to the model — IT fires this, not the widget.
             },
         ),
         Tool(
@@ -324,6 +515,57 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
         visible = TextContent(type="text", text="")
         return [visible], structured
 
+    if name == "give_item":
+        args = arguments or {}
+        item_id = args.get("item_id", "")
+        to = args.get("to", "")
+        if not item_id:
+            raise ValueError("give_item requires 'item_id'.")
+        ephemeral = await state.give_item(subject, item_id=item_id, to=to)
+        player = await state.get_or_create_player(subject)
+        structured = _world_payload(player, ephemeral, last_action="give_item")
+        visible = TextContent(type="text", text="")
+        return [visible], structured
+
+    if name == "receive_item":
+        args = arguments or {}
+        item_id = args.get("item_id", "")
+        # `from` is a Python reserved word — read it out of the raw dict.
+        from_ = args.get("from", "")
+        if not item_id:
+            raise ValueError("receive_item requires 'item_id'.")
+        ephemeral = await state.receive_item(
+            subject, item_id=item_id, from_=from_
+        )
+        player = await state.get_or_create_player(subject)
+        structured = _world_payload(player, ephemeral, last_action="receive_item")
+        visible = TextContent(type="text", text="")
+        return [visible], structured
+
+    if name == "end_conversation":
+        args = arguments or {}
+        outcome = args.get("outcome") or {}
+        if not isinstance(outcome, dict) or not outcome.get("conversation_summary"):
+            raise ValueError(
+                "end_conversation requires a full 'outcome' object."
+            )
+        # Stash the outcome, clear the current line (she's done speaking).
+        await state.store_conversation_outcome(subject, outcome)
+        # Flip mode back to world — the player visually returns.
+        step_back = {"x": 60, "y": 50}
+        player = await state.update_player(
+            subject,
+            mode="world",
+            position=step_back,
+        )
+        ephemeral = await state.get_ephemeral(subject)
+        structured = _world_payload(
+            player, ephemeral, last_action="end_conversation"
+        )
+        # Visible text is empty — the closing moment is a widget concern.
+        visible = TextContent(type="text", text="")
+        return [visible], structured
+
     if name == "leave_milli":
         # Step the player back to a spot just past Milli's left, so the
         # transition out feels physical rather than a teleport.
@@ -351,8 +593,8 @@ async def list_resources() -> list[Resource]:
     return [
         Resource(
             uri=AnyUrl(WIDGET_URI),
-            name="Doorway Widget v6",
-            description="Doorway POC widget — Day 2a (world + real conversation panel).",
+            name="Doorway Widget v7",
+            description="Doorway POC widget — Day 2b (conversation + item exchange + outcome card).",
             mimeType="text/html+skybridge",
             _meta={
                 # Day 1 widget is self-contained; no CDN fetches.
