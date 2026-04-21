@@ -61,10 +61,15 @@ from . import state
 #        re-rendering because ChatGPT doesn't reliably push toolOutput
 #        updates for widget-initiated calls the way it does for model
 #        calls. v3 uses callTool's return value + optimistic local flip.
-#   v4 = PIP pinning. Widget requests picture-in-picture on load so the
-#        game stays a single persistent window and chats flow underneath.
-WIDGET_URI = "ui://widget/doorway-v4.html"
-WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v4.html"
+#   v4 = PIP attempt #1 — broken. Called requestDisplayMode on mount via
+#        setTimeout, which violates the browser's gesture-gated rule for
+#        display-mode changes. Silent fail, stayed inline.
+#   v5 = PIP attempt #2 — fixed. requestDisplayMode is now called
+#        synchronously inside a one-shot pointerdown handler. First tap
+#        on the widget = pin gesture. Argument shape is { mode: "pip" }
+#        not "pip". See "user-gesture rule" in CHATGPT_APP_HANDOVER.md.
+WIDGET_URI = "ui://widget/doorway-v5.html"
+WIDGET_PATH = Path(__file__).parent / "widgets" / "doorway_v5.html"
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -243,7 +248,7 @@ async def list_resources() -> list[Resource]:
     return [
         Resource(
             uri=AnyUrl(WIDGET_URI),
-            name="Doorway Widget v4",
+            name="Doorway Widget v5",
             description="Doorway POC widget — Day 1 (world + conversation placeholder).",
             mimeType="text/html+skybridge",
             _meta={
