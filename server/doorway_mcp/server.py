@@ -1,11 +1,16 @@
 """
-Doorway MCP Server — POC (Day 2b: conversation with items + structured close).
+Doorway MCP Server — POC (Day 3a: Milli remembers across sessions).
 
-Day 2b adds the mechanical shape around the emotional centre Day 2a proved
-out. The model can now give Milli something (the flower), receive something
-back (her recipe card), and close the conversation with a structured outcome
-that a future Day 3 will turn into memory. Nothing here changes Milli's voice;
-it just gives her hands.
+Day 3a turns the structured outcome Day 2b was quietly generating into
+durable memory. When end_conversation fires, the outcome is now ALSO
+appended to a persistent log keyed on (subject_id, character_id). When
+approach_milli fires, the brief pulls the most recent ~3 outcomes and
+renders them as Milli's own journal-style notes, with a hard guardrail
+against extrapolating past what's logged.
+
+The memory is invisible in the widget on purpose — no "visits: 3" counter,
+no relationship meter. The magic of memory working is that her next line
+lands with specific weight, not that a number ticked up.
 
 Tools:
 
@@ -180,7 +185,7 @@ def _world_payload(player: dict, ephemeral: dict, last_action: str) -> dict:
         "milli_mood": ephemeral.get("milli_mood"),
         "last_outcome": ephemeral.get("last_outcome"),
         "last_action": last_action,
-        "phase": "day_2b",
+        "phase": "day_3a",
     }
 
 
@@ -527,12 +532,17 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
             position=state.PLAYER_AT_MILLI,
         )
         ephemeral = await state.get_ephemeral(subject)
+        # Day 3a — pull the most recent conversation outcomes so the brief
+        # can render them as Milli's memory. Empty list on first visit (or
+        # first since a local server reset); the brief handles that
+        # gracefully by emitting the no-specific-memory guardrail.
+        memories = await state.get_recent_outcomes(subject, "milli", limit=3)
         structured = _world_payload(player, ephemeral, last_action="approach_milli")
         # Hand the brief to the model as host instructions. After this
         # returns, the model should immediately call milli_says with its
         # first line. The visible text is the brief — the model reads this
         # and behaves as Milli for the rest of the conversation.
-        brief = milli_module.compose_milli_brief()
+        brief = milli_module.compose_milli_brief(memories=memories)
         visible = TextContent(type="text", text=brief)
         return [visible], structured
 
@@ -583,8 +593,12 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
             raise ValueError(
                 "end_conversation requires a full 'outcome' object."
             )
-        # Stash the outcome, clear the current line (she's done speaking).
+        # Stash the outcome for the widget's closing "outcome card" AND
+        # append it to the durable log so Milli reads it on the next visit.
+        # The two sinks take the same object but have different lifetimes:
+        # the ephemeral slot is wiped on next conversation, the log persists.
         await state.store_conversation_outcome(subject, outcome)
+        await state.log_conversation_outcome(subject, "milli", outcome)
         # Flip mode back to world — the player visually returns.
         step_back = {"x": 60, "y": 50}
         player = await state.update_player(

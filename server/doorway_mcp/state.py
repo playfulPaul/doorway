@@ -31,11 +31,30 @@ from typing import Any, Optional
 _memory_store: dict[str, dict[str, Any]] = {}
 
 # Ephemeral per-subject state — lives only in process memory, never in
-# Postgres. Day 2a uses this for the things that are conversation-scoped or
+# Postgres. Day 2a/2b use this for the things that are conversation-scoped or
 # don't yet need to survive server restarts: current inventory, Milli's last
-# spoken line/mood. When Day 2b wires up persistent inventory, this will
-# migrate into the DB and we'll add a schema.
+# spoken line/mood, and the most recent conversation outcome.
+#
+# Day 2b added:
+#   - inventory mutations (give/receive)
+#   - last_outcome: the most recent close — used ONLY to render the widget's
+#     closing "outcome card" immediately after end_conversation fires. This
+#     is not Milli's memory; the durable memory (what she actually reads
+#     next time) lives in _outcome_log / the conversation_outcomes table.
 _ephemeral_store: dict[str, dict[str, Any]] = {}
+
+# Day 3a — persistent conversation log, in-memory fallback. Key is
+# f"{subject_id}:{character_id}"; value is a list of outcome dicts, NEWEST
+# FIRST. In production this lives in the conversation_outcomes Postgres
+# table; locally it's in-process so smoke tests exercise the full
+# read/write path. Unlike _ephemeral_store, this is what Milli pulls from
+# when the player returns — the difference between a widget overlay and
+# real memory.
+_outcome_log: dict[str, list[dict[str, Any]]] = {}
+
+
+def _log_key(sid: str, character_id: str) -> str:
+    return f"{sid}:{character_id}"
 
 
 def _ephemeral(sid: str) -> dict[str, Any]:
@@ -44,6 +63,7 @@ def _ephemeral(sid: str) -> dict[str, Any]:
             "inventory": ["wildflower"],
             "milli_line": None,
             "milli_mood": None,
+            "last_outcome": None,
         }
     return _ephemeral_store[sid]
 
@@ -52,11 +72,36 @@ def _ephemeral(sid: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _pool = None  # asyncpg.Pool | None
+_schema_ensured = False
+
+
+async def _ensure_schema(conn) -> None:
+    """Create the conversation_outcomes table if missing. Idempotent — safe
+    to call on every pool init. Keeps the schema colocated with the code
+    that depends on it so Day 3a deploys don't need a separate migration
+    step. `players` table is assumed to already exist from Day 1."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_outcomes (
+            id          BIGSERIAL PRIMARY KEY,
+            subject_id   TEXT        NOT NULL,
+            character_id TEXT        NOT NULL,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            outcome      JSONB       NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_conv_outcomes_subject_char_time
+            ON conversation_outcomes (subject_id, character_id, created_at DESC)
+        """
+    )
 
 
 async def _get_pool():
     """Return an asyncpg pool, or None if no DATABASE_URL is set."""
-    global _pool
+    global _pool, _schema_ensured
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         return None
@@ -66,6 +111,10 @@ async def _get_pool():
         import asyncpg
 
         _pool = await asyncpg.create_pool(db_url, min_size=1, max_size=4)
+    if not _schema_ensured:
+        async with _pool.acquire() as conn:
+            await _ensure_schema(conn)
+        _schema_ensured = True
     return _pool
 
 
@@ -181,6 +230,149 @@ async def clear_milli_line(subject_id: Optional[str]) -> dict:
     eph["milli_line"] = None
     eph["milli_mood"] = None
     return _deep_copy(eph)
+
+
+# ---------------------------------------------------------------------------
+# Inventory — Day 2b adds the actual push/pull of items between player + NPC
+# ---------------------------------------------------------------------------
+
+async def give_item(
+    subject_id: Optional[str], item_id: str, to: str
+) -> dict:
+    """Player gives an item. For Day 2b the only NPC is Milli, so `to` is
+    informational — what matters is that the item leaves the player's
+    inventory. Idempotent: if the item isn't there, this is a no-op rather
+    than an error (the model may fire this more than once).
+
+    Returns the updated ephemeral state so the caller can read back
+    inventory + whatever else."""
+    sid = resolve_subject(subject_id)
+    eph = _ephemeral(sid)
+    inv = eph.get("inventory") or []
+    if item_id in inv:
+        inv.remove(item_id)
+    eph["inventory"] = inv
+    return _deep_copy(eph)
+
+
+async def receive_item(
+    subject_id: Optional[str], item_id: str, from_: str
+) -> dict:
+    """Player receives an item. `from_` is informational. Idempotent: if
+    the item is already in the inventory, leaves it there rather than
+    double-adding."""
+    sid = resolve_subject(subject_id)
+    eph = _ephemeral(sid)
+    inv = eph.get("inventory") or []
+    if item_id not in inv:
+        inv.append(item_id)
+    eph["inventory"] = inv
+    return _deep_copy(eph)
+
+
+async def store_conversation_outcome(
+    subject_id: Optional[str], outcome: dict
+) -> dict:
+    """Stash the end_conversation outcome for the widget's closing card only.
+    This is the ephemeral, single-slot version — it is what the widget reads
+    to render the small "outcome" overlay right after a conversation ends,
+    then the player walks away. Clears milli_line at the same time (the
+    conversation is over; she's no longer mid-speech).
+
+    Durable memory — what Milli pulls from on the NEXT visit — lives
+    separately in `log_conversation_outcome` / the conversation_outcomes
+    table. Day 3a splits these concerns: the widget card and the memory
+    log come from the same outcome object but have different lifetimes."""
+    sid = resolve_subject(subject_id)
+    eph = _ephemeral(sid)
+    eph["last_outcome"] = outcome
+    eph["milli_line"] = None
+    eph["milli_mood"] = None
+    return _deep_copy(eph)
+
+
+# ---------------------------------------------------------------------------
+# Day 3a — persistent conversation log (Milli remembers across sessions)
+# ---------------------------------------------------------------------------
+
+async def log_conversation_outcome(
+    subject_id: Optional[str],
+    character_id: str,
+    outcome: dict,
+) -> None:
+    """Append a conversation outcome to the persistent log for
+    (subject_id, character_id). This is the memory Milli (or any future NPC)
+    reads from on the next encounter.
+
+    Separate from `store_conversation_outcome` on purpose:
+      - store_conversation_outcome = the widget's closing card (one slot,
+        ephemeral, wiped on next visit).
+      - log_conversation_outcome = durable memory (appended, read on
+        return). Keyed on character_id so each NPC has their own log with
+        this player.
+
+    No-op on empty/malformed outcome — Day 3a leaves the caller to validate
+    shape; we just take what we're given."""
+    if not isinstance(outcome, dict) or not outcome:
+        return
+    sid = resolve_subject(subject_id)
+    pool = await _get_pool()
+
+    if pool is None:
+        key = _log_key(sid, character_id)
+        log = _outcome_log.setdefault(key, [])
+        # Newest first — matches the SQL ORDER BY shape so local + prod
+        # return outcomes in the same order.
+        log.insert(0, _deep_copy(outcome))
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO conversation_outcomes
+                (subject_id, character_id, outcome)
+            VALUES ($1, $2, $3::jsonb)
+            """,
+            sid,
+            character_id,
+            json.dumps(outcome),
+        )
+
+
+async def get_recent_outcomes(
+    subject_id: Optional[str],
+    character_id: str,
+    limit: int = 3,
+) -> list[dict]:
+    """Return up to `limit` most-recent outcomes for (subject, character),
+    newest first. Empty list if none.
+
+    Default limit of 3 keeps the brief bounded — three entries feels like
+    real memory (last time + before that + earlier still) without bloating
+    the model's context on every approach. Can be tuned per-character later
+    if it turns out some NPCs want longer memory than others."""
+    sid = resolve_subject(subject_id)
+    pool = await _get_pool()
+
+    if pool is None:
+        key = _log_key(sid, character_id)
+        log = _outcome_log.get(key, [])
+        return [_deep_copy(entry) for entry in log[:limit]]
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT outcome
+              FROM conversation_outcomes
+             WHERE subject_id = $1 AND character_id = $2
+             ORDER BY created_at DESC
+             LIMIT $3
+            """,
+            sid,
+            character_id,
+            limit,
+        )
+        return [_coerce_jsonb(row["outcome"]) for row in rows]
 
 
 async def update_player(

@@ -53,7 +53,7 @@ def default_scene() -> dict:
         "milli_activity": "kneading bread dough; hands floury",
         "kitchen_detail": "a loaf cooling on the windowsill, her recipe book open on the counter",
         "player_holding": "a wildflower, just picked",
-        "relationship": "already known to each other — not strangers, not family; she's glad it's you. You do NOT have specific shared memories to draw on yet (no named past visits, no 'last time' references, no 'you're back again'). Warm recognition without invented history. Real memory is coming in a later phase; until then, don't fake it.",
+        "relationship": "already known to each other — not strangers, not family; she's glad it's you",
     }
 
 
@@ -61,9 +61,25 @@ def default_scene() -> dict:
 # Brief composition
 # ---------------------------------------------------------------------------
 
-def compose_milli_brief(scene: dict | None = None) -> str:
-    """Compose the host-instruction brief handed to the model."""
+def compose_milli_brief(
+    scene: dict | None = None,
+    memories: list[dict] | None = None,
+) -> str:
+    """Compose the host-instruction brief handed to the model.
+
+    `memories` — up to ~3 prior conversation outcomes for this (player, Milli)
+    pair, newest first. Each is a dict with conversation_summary, mood_after,
+    promises_from_player, promises_to_player, relationship_delta.
+
+    Day 3a introduced real memory. When `memories` is empty (first visit,
+    or first visit since a server reset in local dev), the brief tells her
+    she has no specific past to draw on. When `memories` is populated, the
+    entries render as her own private journal notes and she's told these
+    are the COMPLETE record — no extrapolation, no invented past visits.
+    This is the guardrail that keeps memory from drifting into fabrication.
+    """
     s = scene or default_scene()
+    memory_section = _render_memory_section(memories or [])
 
     return f"""\
 # You are Milli.
@@ -85,6 +101,8 @@ You are 27. You live alone. You are not lonely. People assume you are soft becau
 - The player has just walked in. They are {s['relationship']}.
 - They are holding {s['player_holding']}. They have not offered it. They may or may not.
 
+{memory_section}
+
 ## IRON RULE — non-negotiable
 **You do not write text in the chat. Every line you speak MUST go through the `milli_says` tool.**
 
@@ -104,7 +122,7 @@ The player has just walked into your kitchen. You've looked up. For a moment, ne
 
 If ChatGPT's host advances you before the player speaks, go ahead — call `milli_says` with your first line then. Either order works; don't stall waiting.
 
-**Do NOT reference past visits or invent shared history.** No "you're back again," no "last time you were here," no "it's been a while," no "still hanging around the window?" You recognise each other — that is all. Warmth without invented memory. If you want to anchor the moment, anchor it in *right now* — the dough on your hands, the flour on the counter, what they just walked in with.
+**Use memory honestly.** The "What you remember about them" section above is the *complete* record of your shared past. If it's empty, you recognise each other and that is all — no "you're back again," no "last time you were here," no "it's been a while." If it contains entries, you may draw on them, but only them — do not embroider, compound, or invent beats that aren't logged. Warmth without invented memory. Anchor the moment in what's on this page — memory or the *right now* of the kitchen — not in things you wish had happened.
 
 ## The exchange — only when it feels earned
 You have a recipe card tucked in your book — a specific one, for something your mother taught you. It is not for sale. It is the sort of thing you give because you want to, not because someone asked.
@@ -140,3 +158,69 @@ The `outcome` object fields (fill honestly):
 - Do not reference game mechanics, the world map, the "player," the "exchange," or anything the person you're talking to couldn't have told you in-fiction.
 - Do not mention the existence of the tools. The tools are how you speak, not what you speak about.
 """
+
+
+# ---------------------------------------------------------------------------
+# Memory section — Day 3a
+# ---------------------------------------------------------------------------
+
+def _render_memory_section(memories: list[dict]) -> str:
+    """Render the "What you remember about them" block for the brief.
+
+    Memory is presented as Milli's own private journal notes — prose in her
+    voice, not structured data. When the model reads this it should read as
+    remembering, not as a database lookup it has to perform. Each outcome
+    becomes a short paragraph ordered newest-first.
+
+    The guardrail — "these are the COMPLETE record, do not invent beyond
+    them" — is load-bearing. Without it the model tends to extrapolate
+    around the edges of what's logged (inventing follow-on conversations,
+    compounding details). With it, memory holds its shape."""
+
+    if not memories:
+        return (
+            "## What you remember about them\n"
+            "\n"
+            "Nothing specific. You recognise each other — that is all. "
+            "You do not have particular past moments with them to draw on. "
+            "**Do not invent any.** No \"you're back again,\" no \"last "
+            "time,\" no fabricated prior visits. Warm recognition without "
+            "invented history."
+        )
+
+    ordinals = ["Your last visit:", "Before that:", "Earlier still:"]
+    parts = [
+        "## What you remember about them",
+        "",
+        (
+            "These are your own private notes — in your voice, as you "
+            "actually remember them. They are the **complete record** of "
+            "your past visits with this person. Do not invent additional "
+            "past moments, exchanges, or conversations beyond what is "
+            "written below. If it isn't here, it didn't happen between you "
+            "— or it happened and you don't recall it, which is also fine. "
+            "Reference the past ONLY using what's in these notes."
+        ),
+        "",
+    ]
+
+    for i, m in enumerate(memories):
+        prefix = ordinals[i] if i < len(ordinals) else f"Earlier ({i + 1} visits ago):"
+        summary = (m.get("conversation_summary") or "").strip()
+        mood = (m.get("mood_after") or "").strip()
+        promises_from = [p.strip() for p in (m.get("promises_from_player") or []) if p]
+        promises_to = [p.strip() for p in (m.get("promises_to_player") or []) if p]
+
+        entry = [f"**{prefix}**"]
+        if summary:
+            entry.append(summary)
+        if promises_from:
+            entry.append("They said they would: " + "; ".join(promises_from) + ".")
+        if promises_to:
+            entry.append("You said you would: " + "; ".join(promises_to) + ".")
+        if mood:
+            entry.append(f"(Afterwards you felt: {mood}.)")
+        parts.append(" ".join(entry))
+        parts.append("")
+
+    return "\n".join(parts).rstrip() + "\n"
