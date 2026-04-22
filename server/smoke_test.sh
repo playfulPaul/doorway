@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Doorway MCP smoke test — Day 3a (memory)
+# Doorway MCP smoke test — Day 3b (today)
 #
 # Usage: ./smoke_test.sh [base_url]
 #   Default base_url: http://127.0.0.1:8000
@@ -90,6 +90,11 @@ echo
 hr
 echo "[5/13] tools/call approach_milli  (expect mode:in_conversation_with_milli)"
 echo "       Visible text should contain Milli's brief — 'You are Milli.' etc."
+echo "       Day 3b: brief should contain a '## Today in your kitchen' section,"
+echo "               with 'Wednesday, the third week', 'sourdough', 'rosemary',"
+echo "               'Elna', and a '## How your day enters the conversation'"
+echo "               rule block. Memory section still reads 'Nothing specific...'"
+echo "               on first contact."
 curl -sS -X POST "$BASE/mcp/" "${HDRS[@]}" -d '{
   "jsonrpc":"2.0","id":4,"method":"tools/call",
   "params":{"name":"approach_milli","arguments":{}}
@@ -183,8 +188,12 @@ echo "  * openai/outputTemplate matches ui://widget/doorway-v7.html exactly"
 echo "  * ONLY leave_milli has ui.visibility: [\"app\"]"
 echo "  * approach_milli, milli_says, give_item, receive_item, end_conversation NOT hidden"
 echo "  * call 4 (open_world) returns inventory:[\"wildflower\"], last_outcome:null"
-echo "  * call 5 (approach_milli) visible text contains the brief, and"
-echo "                            \"What you remember\" reads 'Nothing specific...'"
+echo "  * call 5 (approach_milli) visible text contains the brief, including:"
+echo "                            - \"## Today in your kitchen\""
+echo "                            - \"Wednesday, the third week\""
+echo "                            - \"sourdough\", \"rosemary\", \"Elna\""
+echo "                            - \"## How your day enters the conversation\""
+echo "                            - \"What you remember\" reads 'Nothing specific...'"
 echo "  * call 6 (milli_says) returns milli_line:\"Track mud in...\", mood:\"dry\""
 echo "  * call 7 (give_item) returns inventory:[] (wildflower gone)"
 echo "  * call 8 (receive_item) returns inventory:[\"recipe_card\"]"

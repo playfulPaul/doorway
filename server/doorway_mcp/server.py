@@ -1,16 +1,25 @@
 """
-Doorway MCP Server — POC (Day 3a: Milli remembers across sessions).
+Doorway MCP Server — POC (Day 3b: Milli has a today).
 
-Day 3a turns the structured outcome Day 2b was quietly generating into
-durable memory. When end_conversation fires, the outcome is now ALSO
-appended to a persistent log keyed on (subject_id, character_id). When
+Day 3b gives Milli a shape to her day: what she's making, what she's
+short on, what's on her mind, what she's wondering about the player.
+None of it is surfaced as a quest. The brief carries it as interior,
+and a paired behavioural rule ("how your day enters the conversation")
+tells the model to let it leak in only when the moment invites it —
+never as a menu, never repeated, never as an interview.
+
+Day 3a (still live) turns each conversation's structured outcome into
+durable memory. When end_conversation fires, the outcome is appended
+to a persistent log keyed on (subject_id, character_id). When
 approach_milli fires, the brief pulls the most recent ~3 outcomes and
 renders them as Milli's own journal-style notes, with a hard guardrail
 against extrapolating past what's logged.
 
-The memory is invisible in the widget on purpose — no "visits: 3" counter,
+Memory is invisible in the widget on purpose — no "visits: 3" counter,
 no relationship meter. The magic of memory working is that her next line
-lands with specific weight, not that a number ticked up.
+lands with specific weight, not that a number ticked up. Day 3b extends
+that invisibility: her wants and curiosities don't show up in the widget
+either. They live in her voice.
 
 Tools:
 
@@ -185,7 +194,7 @@ def _world_payload(player: dict, ephemeral: dict, last_action: str) -> dict:
         "milli_mood": ephemeral.get("milli_mood"),
         "last_outcome": ephemeral.get("last_outcome"),
         "last_action": last_action,
-        "phase": "day_3a",
+        "phase": "day_3b",
     }
 
 
@@ -537,12 +546,17 @@ async def call_tool(name: str, arguments: dict) -> tuple[list[TextContent], dict
         # first since a local server reset); the brief handles that
         # gracefully by emitting the no-specific-memory guardrail.
         memories = await state.get_recent_outcomes(subject, "milli", limit=3)
+        # Day 3b — pull Milli's "today" shape. For now this is a constant
+        # (Wednesday, week 3). When we have a real calendar or per-day
+        # schedules, this becomes a function of day_of_week + subject's
+        # recent outcomes (so her mood across days can shift).
+        today = milli_module.default_today()
         structured = _world_payload(player, ephemeral, last_action="approach_milli")
         # Hand the brief to the model as host instructions. After this
         # returns, the model should immediately call milli_says with its
         # first line. The visible text is the brief — the model reads this
         # and behaves as Milli for the rest of the conversation.
-        brief = milli_module.compose_milli_brief(memories=memories)
+        brief = milli_module.compose_milli_brief(memories=memories, today=today)
         visible = TextContent(type="text", text=brief)
         return [visible], structured
 

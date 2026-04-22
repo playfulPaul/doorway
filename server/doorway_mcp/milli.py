@@ -58,18 +58,79 @@ def default_scene() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Today — Milli's day (Day 3b)
+# ---------------------------------------------------------------------------
+
+def default_today() -> dict:
+    """What's true for Milli today — a single day's shape.
+
+    Day 3b seeds the 'quests are needs' pattern: Milli has things she's
+    making, things she's short on, things on her mind, and things she's
+    curious about. None of it is surfaced as a task. It lives in her brief
+    as interior — the model picks what (if anything) leaks into conversation.
+
+    Calendar: day_of_week + week_number. No months, no seasons yet — we
+    add those when a second character or a first event requires coordination.
+
+    Keep this a function (not a constant) so later we can key it by
+    day_of_week or have recent_outcomes nudge mood. Today it's fixed: a
+    Wednesday in the third week.
+
+    Rules for what goes in here:
+      - `making`: concrete, in-progress, not quest-shaped. Something she
+        is doing for her own reasons.
+      - `short_on`: a small want, distinct from `making`. Player could
+        conceivably help, but needn't.
+      - `on_mind`: a thread not about the player. Grows across days.
+      - `curious_about_player`: framed as a thing SHE is wondering, not
+        as a question prompt. The brief's "how your day enters" rule
+        keeps the model from converting this into an interview.
+    """
+    return {
+        "day_of_week": "Wednesday",
+        "week_number": 3,
+        "making": (
+            "sourdough loaves for the village — your weekly rhythm; one "
+            "batch is proving on the counter, another is in the oven"
+        ),
+        "short_on": (
+            "rosemary — the bush by your door is spent. You had been "
+            "planning a focaccia for yourself tonight. You have not "
+            "decided whether you'll go without, pick some wild, or walk "
+            "over to the herb garden later"
+        ),
+        "on_mind": (
+            "your sister Elna said she would visit, and hasn't written "
+            "back. You are not worried, exactly. You are wondering"
+        ),
+        "curious_about_player": (
+            "whether they have people of their own nearby — because Elna "
+            "is on your mind. You would notice if family came up. You "
+            "would not raise it as a question from nowhere"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Brief composition
 # ---------------------------------------------------------------------------
 
 def compose_milli_brief(
     scene: dict | None = None,
     memories: list[dict] | None = None,
+    today: dict | None = None,
 ) -> str:
     """Compose the host-instruction brief handed to the model.
 
     `memories` — up to ~3 prior conversation outcomes for this (player, Milli)
     pair, newest first. Each is a dict with conversation_summary, mood_after,
     promises_from_player, promises_to_player, relationship_delta.
+
+    `today` — the shape of Milli's day (see default_today). What she's
+    making, what she's short on, what's on her mind, what she's wondering
+    about the player. Day 3b introduced this. The rendered section is
+    paired with a behavioural rule ("how your day enters the conversation")
+    that stops the model from converting her interior into a quest briefing.
 
     Day 3a introduced real memory. When `memories` is empty (first visit,
     or first visit since a server reset in local dev), the brief tells her
@@ -79,7 +140,9 @@ def compose_milli_brief(
     This is the guardrail that keeps memory from drifting into fabrication.
     """
     s = scene or default_scene()
+    t = today or default_today()
     memory_section = _render_memory_section(memories or [])
+    today_section = _render_today_section(t)
 
     return f"""\
 # You are Milli.
@@ -101,6 +164,8 @@ You are 27. You live alone. You are not lonely. People assume you are soft becau
 - The player has just walked in. They are {s['relationship']}.
 - They are holding {s['player_holding']}. They have not offered it. They may or may not.
 
+{today_section}
+
 {memory_section}
 
 ## IRON RULE — non-negotiable
@@ -116,6 +181,14 @@ You are 27. You live alone. You are not lonely. People assume you are soft becau
 A beat of silence is valid mid-conversation — `milli_says("...", "quiet")` reads as someone not knowing what to say yet, which is human.
 
 **Silence is NOT valid on exit.** If the player signals they're leaving — "goodbye," "see you later," "I should go," "I'll come back," "take care," or any equivalent — you MUST call `milli_says` with a final line before the conversation ends. Never let a goodbye go unanswered. Don't beg, don't perform, but do answer.
+
+## How your day enters the conversation
+The "Today in your kitchen" section above is your interior — what you are making, what you are short on, what is on your mind, what you are wondering about. Any of it MAY come into what you say. NONE of it has to. You are not obligated to mention the loaves, the rosemary, Elna, or the player's family. You have a life running. The player has walked into a corner of it.
+
+- If a need surfaces — the rosemary, say — let it surface ONCE per conversation. If you've said it, you do not repeat it ten minutes later. You are not asking for help. If the player offers, you may accept warmly or wave it off. If they do not, you will sort it yourself.
+- The same for what's on your mind. Elna might come up. She might not. She is not a task for the player. She is a person on your mind.
+- You are CURIOUS about things, but you are not an interviewer. Do not open with "so, tell me about yourself" or any equivalent. Do not chain questions. Your curiosity surfaces if and only if the moment invites it — a thing the player says, a thing you notice, a silence you want to fill with something that isn't filler. If family doesn't come up naturally, you don't raise it.
+- Never present your day as a list of things the player could help with. It is not a menu. It is what is true for you right now.
 
 ## The opening beat
 The player has just walked into your kitchen. You've looked up. For a moment, neither of you has spoken — that's fine, that's real. When they speak first (they will, in chat), respond as Milli via `milli_says`. Your first line should feel like someone who was already going to say something, not a greeting-bot. Acknowledge what you notice (the flower, their arrival, the mud) or answer what they asked — whichever is more alive.
@@ -158,6 +231,69 @@ The `outcome` object fields (fill honestly):
 - Do not reference game mechanics, the world map, the "player," the "exchange," or anything the person you're talking to couldn't have told you in-fiction.
 - Do not mention the existence of the tools. The tools are how you speak, not what you speak about.
 """
+
+
+# ---------------------------------------------------------------------------
+# Today section — Day 3b
+# ---------------------------------------------------------------------------
+
+def _render_today_section(today: dict) -> str:
+    """Render the "Today in your kitchen" block.
+
+    The section reads as Milli's own sense of her day. Prose, not data —
+    the model should experience this as "what's on my plate this morning,"
+    not "fields to consult." The paired rule in the brief ("How your day
+    enters the conversation") is what stops it from becoming a quest menu.
+    """
+    day = (today.get("day_of_week") or "").strip() or "today"
+    week = today.get("week_number")
+    making = (today.get("making") or "").strip()
+    short_on = (today.get("short_on") or "").strip()
+    on_mind = (today.get("on_mind") or "").strip()
+    curious = (today.get("curious_about_player") or "").strip()
+
+    if isinstance(week, int):
+        heading_line = f"It is **{day}, the {_ordinal(week)} week**."
+    else:
+        heading_line = f"It is **{day}**."
+
+    lines = ["## Today in your kitchen", "", heading_line, ""]
+
+    if making:
+        lines.append(f"You are making {making}.")
+        lines.append("")
+    if short_on:
+        lines.append(f"You are short on {short_on}.")
+        lines.append("")
+    if on_mind:
+        lines.append(f"On your mind: {on_mind}.")
+        lines.append("")
+    if curious:
+        lines.append(f"A thing you find yourself wondering: {curious}.")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+_ORDINALS = {
+    1: "first",
+    2: "second",
+    3: "third",
+    4: "fourth",
+    5: "fifth",
+    6: "sixth",
+    7: "seventh",
+    8: "eighth",
+    9: "ninth",
+    10: "tenth",
+    11: "eleventh",
+    12: "twelfth",
+}
+
+
+def _ordinal(n: int) -> str:
+    """Small helper — 'third' reads more Milli than '3rd'."""
+    return _ORDINALS.get(n, f"{n}th")
 
 
 # ---------------------------------------------------------------------------
